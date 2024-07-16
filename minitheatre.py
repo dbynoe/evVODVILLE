@@ -1,18 +1,8 @@
-# Mini theatre script for running a one button video player
-#    Copyright (C) 2024 David Bynoe
-#
-#    This program is free software: you can redistribute it and/or modify
-#    it under the terms of the GNU General Public License as published by
-#    the Free Software Foundation, either version 3 of the License, or
-#    (at your option) any later version.
-#
-#   This program is distributed in the hope that it will be useful,
-#    but WITHOUT ANY WARRANTY; without even the implied warranty of
-#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#    GNU General Public License for more details.
-#
-#    You should have received a copy of the GNU General Public License
-#    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#!/usr/bin/python
+
+# Raspberry Pi GPIO-controlled video looper
+# Copyright (c) 2019 Alex Lubbock
+# License MIT
 
 import RPi.GPIO as GPIO
 import os
@@ -22,28 +12,6 @@ import time
 from threading import Lock
 import signal
 import argparse
-import pigpio
-pi = pigpio.pi() # connect to local Pi
-lastpress = time.time()
-
-
-# House lights - 12v mosfet 
-lpin = 18
-
-#Brightness range
-lmin = 3 
-lmax = 255
-
-#stuff related to the file count
-vidcount = 0 #Number of videos available in the usb home directory  
-curvideo = 0 #Which video number are we playing at the moment 
-
-# I set things up so I could use a pin to toggle the power button on my display 
-# theory is that it saves power/ makes the display last longer
-# Its not ideal, there is no feedback so things can get unsynchronized 
-state = 0 #current power state of the display 
-screenpin  = 17 #pin to toggle the display on/off
-sleepwait = 0.1 #Time delay for how long to hold a button press to toggle the display. 
 
 
 class _GpioParser(argparse.Action):
@@ -94,15 +62,13 @@ class VidLooper(object):
     # The currently playing video filename
     _active_vid = None
 
-
     # The process of the active video player
     _p = None
 
     def __init__(self, audio='hdmi', autostart=True, restart_on_press=False,
                  video_dir=os.getcwd(), videos=None, gpio_pins=None, loop=True,
                  no_osd=False, shutdown_pin=None, splash=None, debug=False):
-		global vidcount
-		# Use default GPIO pins, if needed
+        # Use default GPIO pins, if needed
         if gpio_pins is None:
             gpio_pins = self._GPIO_PIN_DEFAULT.copy()
         self.gpio_pins = gpio_pins
@@ -123,10 +89,16 @@ class VidLooper(object):
             if not self.videos:
                 raise Exception('No videos found in "{}". Please specify a different '
                                 'directory or filename(s).'.format(video_dir))
-		vidcount = len(self.videos)
+
+        # Check that we have enough GPIO input pins for every video
+        assert len(videos) <= len(self.gpio_pins), \
+            "Not enough GPIO pins configured for number of videos"
+
         self.debug = debug
+
         assert audio in ('hdmi', 'local', 'both'), "Invalid audio choice"
         self.audio = audio
+
         self.autostart = autostart
         self.restart_on_press = restart_on_press
         self.loop = loop
@@ -142,63 +114,40 @@ class VidLooper(object):
 
     def switch_vid(self, pin):
         """ Switch to the video corresponding to the shorted pin """
-		global state
-        global curvideo
-		global vidcount
-		lightsdown = 0
-		global lastpress
-		# only allow button presses every 2 seconds to avoid multiple videos because toddlers
-		if time.time() > lastpress  + 2:
-			lastpress = time.time()
-			# Use a mutex lock to avoid race condition when
-        	with self._mutex:
-        	filename = self.videos[curvideo]
-			curvideo = curvideo + 1
-			if curvideo >= vidcount:
-				curvideo = 0
-				if filename != self._active_vid or self.restart_on_press:
-                	# Kill any previous video player process
-               		self._kill_process()
-				GPIO.output (screenpin, GPIO.HIGH) #toggle the power button
-				time.sleep(sleepwait)
-				#wait a beat like you got a fat finger
-				GPIO.output (screenpin, GPIO.LOW)
-				lightsdown = 1 #we are a real theater now, lets dim the lights
-				state = 1 # screen is on
 
+        # Use a mutex lock to avoid race condition when
+        # multiple buttons are pressed quickly
+        with self._mutex:
+            # Update the output pins' states
+            for in_pin, out_pin in self.gpio_pins.items():
+                if out_pin is not None:
+                    GPIO.output(out_pin,
+                                GPIO.HIGH if in_pin == pin else GPIO.LOW)
 
-                	# Start a new video player process, capture STDOUT to keep the
-               		# screen clear. Set a session ID (os.setsid) to allow us to kill
-                	# the whole video player process tree.
-                	cmd = ['omxplayer','--win', '120,25,590,530', '--orientation', '180', '-b', '--aspect-mode', 'stretch',  '-o', self.audio]
-                	if self.loop:
-                    		cmd += ['--loop']
-                	if self.no_osd:
-                    		cmd += ['--no-osd']			
-                	self._p = Popen(cmd + [filename],
+            filename = self.videos[self.in_pins.index(pin)]
+            if filename != self._active_vid or self.restart_on_press:
+                # Kill any previous video player process
+                self._kill_process()
+                # Start a new video player process, capture STDOUT to keep the
+                # screen clear. Set a session ID (os.setsid) to allow us to kill
+                # the whole video player process tree.
+                cmd = ['omxplayer', '-b', '-o', self.audio]
+                if self.loop:
+                    cmd += ['--loop']
+                if self.no_osd:
+                    cmd += ['--no-osd']
+                self._p = Popen(cmd + [filename],
                                 stdout=None if self.debug else PIPE,
                                 preexec_fn=os.setsid)
-                	self._active_vid = filename
-                	if lightsdown:
-						for p in range(lmax,lmin,-1):
-                        		pi.set_PWM_dutycycle(lpin, p)
-                        		time.sleep(0.013)
-						lightsdown  = 0
-						#Spread the dimming over 3, seconds to give the screen time to wake up
+                self._active_vid = filename
 
+    @property
     def in_pins(self):
         """ Create a tuple of input pins, for easy access """
         return tuple(self.gpio_pins.keys())
 
     def start(self):
-		global pi
-		global state
-    	if not state:
-			for p in range(lmin, lmax):
-        			pi.set_PWM_dutycycle(lpin, p)
-        			time.sleep(0.013)
-
-		if not self.debug:
+        if not self.debug:
             # Clear the screen
             os.system('clear')
             # Disable the (blinking) cursor
@@ -206,15 +155,11 @@ class VidLooper(object):
 
         # Set up GPIO
         GPIO.setmode(GPIO.BCM)
-
-		GPIO.setup(screenpin, GPIO.OUT)
-		GPIO.output(screenpin, GPIO.HIGH)
-        time.sleep(sleepwait) #wait a beat like you got a fat finger
-        GPIO.output (screenpin, GPIO.LOW)
-
         for in_pin, out_pin in self.gpio_pins.items():
-        	GPIO.setup(in_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-
+            GPIO.setup(in_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            if out_pin is not None:
+                GPIO.setup(out_pin, GPIO.OUT)
+                GPIO.output(out_pin, GPIO.LOW)
 
         # Set up the shutdown pin
         if self.shutdown_pin:
@@ -254,20 +199,7 @@ class VidLooper(object):
                                     GPIO.output(out_pin, GPIO.LOW)
                             self._active_vid = None
                             self._p = None
-			    #if pi.get_PWM_dutycycle(lpin) != lmax:
-			    if state == 1:
-  			    	GPIO.output (screenpin, GPIO.HIGH)
-                		time.sleep(sleepwait)
-                		#wait a beat like you got a fat finger
-                		GPIO.output (screenpin, GPIO.LOW)
-				state=0
 
-				for p in range(lmin, lmax, 1):
-    					pi.set_PWM_dutycycle(lpin, p)
-    					time.sleep(0.013)
-
-	except KeyboardInterrupt:
-	    pass
         finally:
             self.__del__()
 
