@@ -185,7 +185,7 @@ class VidLooper(object):
                         		time.sleep(0.013)
 						lightsdown  = 0
 						#Spread the dimming over 3, seconds to give the screen time to wake up
-
+	@property
     def in_pins(self):
         """ Create a tuple of input pins, for easy access """
         return tuple(self.gpio_pins.keys())
