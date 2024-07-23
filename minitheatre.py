@@ -30,8 +30,7 @@ lastpress = time.time()
 lpin = 18
 
 #Brightness range
-
-lmin = 3
+lmin = 40
 lmax = 255
 
 #stuff related to the file count
@@ -42,8 +41,12 @@ curvideo = 0 #Which video number are we playing at the moment
 # theory is that it saves power/ makes the display last longer
 # Its not ideal, there is no feedback so things can get unsynchronized 
 state = 0 #current power state of the display 
-screenpin  = 17 #pin to toggle the display on/off
+screentoggle = 1 #toggle the screen or not, 0 is not 
+#screenpin  = 17 #pin to toggle the display on/off - depreciated
 sleepwait = 0.1 #Time delay for how long to hold a button press to toggle the display. 
+
+
+
 
 class _GpioParser(argparse.Action):
     """ Parse a GPIO spec string (see argparse setup later in this file) """
@@ -152,8 +155,8 @@ class VidLooper(object):
 	global vidcount
 	lightsdown = 0
 	global lastpress
-	#only allow button presses every 5 seconds to avoid multiple videos 
-	if time.time() > lastpress  + 5:
+	#only allow button presses every 4 seconds to avoid multiple videos 
+	if time.time() > lastpress  + 4:
 		lastpress = time.time()
 	#global pi
 	# Use a mutex lock to avoid race condition when
@@ -167,17 +170,29 @@ class VidLooper(object):
            	 if filename != self._active_vid or self.restart_on_press:
                 	# Kill any previous video player process
                		self._kill_process()
-			#dim the lights
-	        	#os.system('clear')
-			#print ("\033c")
-			if not state:
-				GPIO.output (screenpin, GPIO.HIGH)
-				time.sleep(sleepwait)
-				#wait a beat like you got a fat finger
-				GPIO.output (screenpin, GPIO.LOW)
-				lightsdown = 1
-				state = 1
+                        #never hurts to clear the screen and the terminal incase some garbage showed up
+                        os.system('clear')
+                        print ("\033c")
 
+
+			if not state: #turn the hdmi power on
+                        	if screentoggle:
+                                        os.system ("vcgencmd display_power 1")
+
+					#cmd =['vcgencmd','display_power','1']
+                                        #self._p = Popen(cmd)
+                                lightsdown = 1
+                                state = 1
+
+			#play a projector spooling up sound, shorter if we already have the lights down
+			if not lightsdown:
+                                cmd = ['aplay','-q', '/home/vodville/sprojector.wav']
+				self._p = Popen(cmd)
+
+                        #else:
+                        #       cmd = ['aplay','-q', '/home/vodville/projector.wav']
+                      	#	self._p = Popen(cmd)
+	
 
                 	# Start a new video player process, capture STDOUT to keep the
                		# screen clear. Set a session ID (os.setsid) to allow us to kill
@@ -187,7 +202,6 @@ class VidLooper(object):
                     		cmd += ['--loop']
                 	if self.no_osd:
                     		cmd += ['--no-osd']
-			#player = Popen ('aplay /media/usb0/Fanfare.wav',shell=True)
 
                 	self._p = Popen(cmd + [filename],
                                 stdout=None if self.debug else PIPE,
@@ -218,6 +232,12 @@ class VidLooper(object):
         			pi.set_PWM_dutycycle(lpin, p)
         			time.sleep(0.013)
 
+	#clear the screen on startup	
+	os.system('clear')
+        print ("\033c")
+
+
+
 	if not self.debug:
             # Clear the screen
             os.system('clear')
@@ -226,11 +246,15 @@ class VidLooper(object):
 
         # Set up GPIO
         GPIO.setmode(GPIO.BCM)
+	#cmd = ['setterm','--blank','1']
+        #self._p = Popen(cmd)
 
-	GPIO.setup(screenpin, GPIO.OUT)
-	GPIO.output(screenpin, GPIO.HIGH)
-        time.sleep(sleepwait) #wait a beat like you got a fat finger
-        GPIO.output (screenpin, GPIO.LOW)
+	if screentoggle: #turn off the screen after boot
+		os.system ("vcgencmd display_power 0")
+
+		#cmd =['vcgencmd','display_power','0']
+                #self._p = Popen(cmd)
+
 
         for in_pin, out_pin in self.gpio_pins.items():
         	GPIO.setup(in_pin, GPIO.IN, pull_up_down=GPIO.PUD_OFF)
@@ -252,6 +276,7 @@ class VidLooper(object):
                                           self.splash])
             else:
                 # Start playing first video
+		#play a projector spooling up sound, shorter if we already have the lights down
                 self.switch_vid(self.in_pins[0])
 
         # Enable event detection on each input pin
@@ -270,20 +295,21 @@ class VidLooper(object):
                         self._p.communicate()
                     if self._p:
                         if self._p.pid == pid:
-                            # Reset LEDs
-                            for out_pin in self.gpio_pins.values():
-                                if out_pin is not None:
-                                    GPIO.output(out_pin, GPIO.LOW)
                             self._active_vid = None
                             self._p = None
-			    if state == 1:
-  			    	GPIO.output (screenpin, GPIO.HIGH)
-                		time.sleep(sleepwait)
-                		#wait a beat like you got a fat finger
-                		GPIO.output (screenpin, GPIO.LOW)
-				state=0
+			    if state == 1: #turn the screen off when we are done 
+  			    	if screentoggle:
+                                        os.system ("vcgencmd display_power 0")
 
-				for p in range(lmin, lmax, 1):
+					#cmd =['vcgencmd','display_power','0']
+                                        #self._p = Popen(cmd)
+
+				state=0
+				#cmd = ['setterm','--blank','1']
+                        	#self._p = Popen(cmd)
+
+
+				for p in range(lmin, lmax, 1): #and bring up the house lights 
     					pi.set_PWM_dutycycle(lpin, p)
     					time.sleep(0.013)
 
