@@ -26,12 +26,11 @@ import pigpio
 pi = pigpio.pi() # connect to local Pi
 lastpress = time.time()
 
-
 # House lights - 12v mosfet 
 lpin = 18
 
 #Brightness range
-lmin = 3 
+
 lmin = 3
 lmax = 255
 
