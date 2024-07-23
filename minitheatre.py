@@ -32,6 +32,7 @@ lpin = 18
 
 #Brightness range
 lmin = 3 
+lmin = 3
 lmax = 255
 
 #stuff related to the file count
@@ -44,7 +45,6 @@ curvideo = 0 #Which video number are we playing at the moment
 state = 0 #current power state of the display 
 screenpin  = 17 #pin to toggle the display on/off
 sleepwait = 0.1 #Time delay for how long to hold a button press to toggle the display. 
-
 
 class _GpioParser(argparse.Action):
     """ Parse a GPIO spec string (see argparse setup later in this file) """
@@ -101,14 +101,17 @@ class VidLooper(object):
     def __init__(self, audio='hdmi', autostart=True, restart_on_press=False,
                  video_dir=os.getcwd(), videos=None, gpio_pins=None, loop=True,
                  no_osd=False, shutdown_pin=None, splash=None, debug=False):
-        global vidcount
-        # Use default GPIO pins, if needed
+	global vidcount
+	# Use default GPIO pins, if needed
         if gpio_pins is None:
             gpio_pins = self._GPIO_PIN_DEFAULT.copy()
         self.gpio_pins = gpio_pins
 
         # Add shutdown pin
         self.shutdown_pin = shutdown_pin
+
+
+
 
         # Assemble the list of videos to play, if needed
         if videos:
@@ -123,10 +126,13 @@ class VidLooper(object):
             if not self.videos:
                 raise Exception('No videos found in "{}". Please specify a different '
                                 'directory or filename(s).'.format(video_dir))
-        vidcount = len(self.videos)
+	vidcount = len(self.videos)
+
         self.debug = debug
+
         assert audio in ('hdmi', 'local', 'both'), "Invalid audio choice"
         self.audio = audio
+
         self.autostart = autostart
         self.restart_on_press = restart_on_press
         self.loop = loop
@@ -142,63 +148,78 @@ class VidLooper(object):
 
     def switch_vid(self, pin):
         """ Switch to the video corresponding to the shorted pin """
-        global state
+	global state
         global curvideo
-        global vidcount
-        lightsdown = 0
-        global lastpress
-        # only allow button presses every 2 seconds to avoid multiple videos because toddlers
-        if time.time() > lastpress  + 2:
-            lastpress = time.time()
-            # Use a mutex lock to avoid race condition when
-            with self._mutex:
-            filename = self.videos[curvideo]
-            curvideo = curvideo + 1
-            if curvideo >= vidcount:
-                curvideo = 0
-                if filename != self._active_vid or self.restart_on_press:
-                    # Kill any previous video player process
-                    self._kill_process()
-                GPIO.output (screenpin, GPIO.HIGH) #toggle the power button
-                time.sleep(sleepwait)
-                #wait a beat like you got a fat finger
-                GPIO.output (screenpin, GPIO.LOW)
-                lightsdown = 1 #we are a real theater now, lets dim the lights
-                state = 1 # screen is on
+	global vidcount
+	lightsdown = 0
+	global lastpress
+	#only allow button presses every 5 seconds to avoid multiple videos 
+	if time.time() > lastpress  + 5:
+		lastpress = time.time()
+	#global pi
+	# Use a mutex lock to avoid race condition when
+        # multiple buttons are pressed quickly
+        	with self._mutex:
+
+        	 filename = self.videos[curvideo]
+	   	 curvideo = curvideo + 1
+	   	 if curvideo >= vidcount:
+			curvideo = 0
+           	 if filename != self._active_vid or self.restart_on_press:
+                	# Kill any previous video player process
+               		self._kill_process()
+			#dim the lights
+	        	#os.system('clear')
+			#print ("\033c")
+			if not state:
+				GPIO.output (screenpin, GPIO.HIGH)
+				time.sleep(sleepwait)
+				#wait a beat like you got a fat finger
+				GPIO.output (screenpin, GPIO.LOW)
+				lightsdown = 1
+				state = 1
 
 
-                    # Start a new video player process, capture STDOUT to keep the
-                    # screen clear. Set a session ID (os.setsid) to allow us to kill
-                    # the whole video player process tree.
-                    cmd = ['omxplayer','--win', '120,25,590,530', '--orientation', '180', '-b', '--aspect-mode', 'stretch',  '-o', self.audio]
-                    if self.loop:
-                            cmd += ['--loop']
-                    if self.no_osd:
-                            cmd += ['--no-osd']         
-                    self._p = Popen(cmd + [filename],
+                	# Start a new video player process, capture STDOUT to keep the
+               		# screen clear. Set a session ID (os.setsid) to allow us to kill
+                	# the whole video player process tree.
+                	cmd = ['omxplayer','--win', '120,25,590,530', '--orientation', '180', '-b', '--aspect-mode', 'stretch',  '-o', self.audio]
+                	if self.loop:
+                    		cmd += ['--loop']
+                	if self.no_osd:
+                    		cmd += ['--no-osd']
+			#player = Popen ('aplay /media/usb0/Fanfare.wav',shell=True)
+
+                	self._p = Popen(cmd + [filename],
                                 stdout=None if self.debug else PIPE,
                                 preexec_fn=os.setsid)
-                    self._active_vid = filename
-                    if lightsdown:
-                        for p in range(lmax,lmin,-1):
-                                pi.set_PWM_dutycycle(lpin, p)
-                                time.sleep(0.013)
-                        lightsdown  = 0
-                        #Spread the dimming over 3, seconds to give the screen time to wake up
+                	self._active_vid = filename
+
+                	if lightsdown:
+				for p in range(lmax,lmin,-1):
+                        		pi.set_PWM_dutycycle(lpin, p)
+                        		time.sleep(0.013)
+				lightsdown  = 0
+				#Spread the dimming over 3, seconds to give the screen time to wake up
+
+
     @property
     def in_pins(self):
         """ Create a tuple of input pins, for easy access """
         return tuple(self.gpio_pins.keys())
 
     def start(self):
-        global pi
-        global state
-        if not state:
-            for p in range(lmin, lmax):
-                    pi.set_PWM_dutycycle(lpin, p)
-                    time.sleep(0.013)
+	global pi
+	global state
 
-        if not self.debug:
+
+    	if not state:
+
+			for p in range(lmin, lmax):
+        			pi.set_PWM_dutycycle(lpin, p)
+        			time.sleep(0.013)
+
+	if not self.debug:
             # Clear the screen
             os.system('clear')
             # Disable the (blinking) cursor
@@ -207,13 +228,15 @@ class VidLooper(object):
         # Set up GPIO
         GPIO.setmode(GPIO.BCM)
 
-        GPIO.setup(screenpin, GPIO.OUT)
-        GPIO.output(screenpin, GPIO.HIGH)
+	GPIO.setup(screenpin, GPIO.OUT)
+	GPIO.output(screenpin, GPIO.HIGH)
         time.sleep(sleepwait) #wait a beat like you got a fat finger
         GPIO.output (screenpin, GPIO.LOW)
 
         for in_pin, out_pin in self.gpio_pins.items():
-            GPIO.setup(in_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        	GPIO.setup(in_pin, GPIO.IN, pull_up_down=GPIO.PUD_OFF)
+
+
 
 
         # Set up the shutdown pin
@@ -254,20 +277,19 @@ class VidLooper(object):
                                     GPIO.output(out_pin, GPIO.LOW)
                             self._active_vid = None
                             self._p = None
-                #if pi.get_PWM_dutycycle(lpin) != lmax:
-                if state == 1:
-                    GPIO.output (screenpin, GPIO.HIGH)
-                        time.sleep(sleepwait)
-                        #wait a beat like you got a fat finger
-                        GPIO.output (screenpin, GPIO.LOW)
-                state=0
+			    if state == 1:
+  			    	GPIO.output (screenpin, GPIO.HIGH)
+                		time.sleep(sleepwait)
+                		#wait a beat like you got a fat finger
+                		GPIO.output (screenpin, GPIO.LOW)
+				state=0
 
-                for p in range(lmin, lmax, 1):
-                        pi.set_PWM_dutycycle(lpin, p)
-                        time.sleep(0.013)
+				for p in range(lmin, lmax, 1):
+    					pi.set_PWM_dutycycle(lpin, p)
+    					time.sleep(0.013)
 
-    except KeyboardInterrupt:
-        pass
+	except KeyboardInterrupt:
+	    pass
         finally:
             self.__del__()
 
