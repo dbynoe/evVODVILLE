@@ -1,4 +1,4 @@
-# Mini theatre script for running a one button video player
+5# Mini theatre script for running a one button video player
 #    Copyright (C) 2024 David Bynoe
 #
 #    This program is free software: you can redistribute it and/or modify
@@ -23,6 +23,9 @@ from threading import Lock
 import signal
 import argparse
 import pigpio
+
+import requests
+
 pi = pigpio.pi() # connect to local Pi
 lastpress = time.time()
 
@@ -30,7 +33,7 @@ lastpress = time.time()
 lpin = 18
 
 #Brightness range
-lmin = 40
+lmin = 12
 lmax = 255
 
 #stuff related to the file count
@@ -45,8 +48,9 @@ screentoggle = 1 #toggle the screen or not, 0 is not
 #screenpin  = 17 #pin to toggle the display on/off - depreciated
 sleepwait = 0.1 #Time delay for how long to hold a button press to toggle the display. 
 
-
-
+db='vodville'
+username = os.getenv('STATS_USERNAME')
+password = os.getenv('STATS_PASSWORD') 
 
 class _GpioParser(argparse.Action):
     """ Parse a GPIO spec string (see argparse setup later in this file) """
@@ -155,9 +159,16 @@ class VidLooper(object):
 	global vidcount
 	lightsdown = 0
 	global lastpress
+	logflag = 0 
 	#only allow button presses every 4 seconds to avoid multiple videos 
 	if time.time() > lastpress  + 4:
-		lastpress = time.time()
+		#Only send to the logging server if its been more than x seconds since the last press
+		if time.time() > lastpress  + 20:
+			logflag = 1
+		else:
+		#toddler spamming button
+			logflag = 2 
+ 		lastpress = time.time()
 	#global pi
 	# Use a mutex lock to avoid race condition when
         # multiple buttons are pressed quickly
@@ -171,8 +182,6 @@ class VidLooper(object):
                 	# Kill any previous video player process
                		self._kill_process()
                         #never hurts to clear the screen and the terminal incase some garbage showed up
-                        os.system('clear')
-                        print ("\033c")
 
 
 			if not state: #turn the hdmi power on
@@ -183,16 +192,21 @@ class VidLooper(object):
                                         #self._p = Popen(cmd)
                                 lightsdown = 1
                                 state = 1
+				#play a projector sound from the PI 
+				cmd = ['aplay','-D','sysdefault:1', '/home/vodville/sprojector.wav']
+                                self._p = Popen(cmd)
+
 
 			#play a projector spooling up sound, shorter if we already have the lights down
 			if not lightsdown:
+				os.system('clear')
+                        	print ("\033c")
                                 cmd = ['aplay','-q', '/home/vodville/sprojector.wav']
 				self._p = Popen(cmd)
 
                         #else:
                         #       cmd = ['aplay','-q', '/home/vodville/projector.wav']
                       	#	self._p = Popen(cmd)
-	
 
                 	# Start a new video player process, capture STDOUT to keep the
                		# screen clear. Set a session ID (os.setsid) to allow us to kill
@@ -214,7 +228,20 @@ class VidLooper(object):
                         		time.sleep(0.013)
 				lightsdown  = 0
 				#Spread the dimming over 3, seconds to give the screen time to wake up
-
+	#post to the stats server
+	if logflag == 1:
+		r = requests.post(
+ 		'https://******************/write?db={}&u={}&p={}'.format(db, username, password),
+                data='vodville button=1'
+                )
+		logflag = 0 
+	if logflag == 2:
+               	r = requests.post(
+                'https://******************/write?db={}&u={}&p={}'.format(db, username, password),
+                data='vodville toddler=1'
+                )
+		logflag =0
+   
 
     @property
     def in_pins(self):
