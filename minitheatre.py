@@ -18,13 +18,16 @@ import RPi.GPIO as GPIO
 import os
 import sys
 from subprocess import Popen, PIPE, call
-import time
+import  time
 from threading import Lock
 import signal
 import argparse
 import pigpio
+import threading
 
 import requests
+
+threads =[]
 
 pi = pigpio.pi() # connect to local Pi
 lastpress = time.time()
@@ -39,18 +42,20 @@ lmax = 255
 #stuff related to the file count
 vidcount = 0 #Number of videos available in the usb home directory  
 curvideo = 0 #Which video number are we playing at the moment 
+vidcountAD = 0 #how many after dark videos 
+curvideoAD = 0  #which after dark video 
 
-# I set things up so I could use a pin to toggle the power button on my display 
-# theory is that it saves power/ makes the display last longer
-# Its not ideal, there is no feedback so things can get unsynchronized 
+AD = False  #are there after dark videos 
+
 state = 0 #current power state of the display 
 screentoggle = 1 #toggle the screen or not, 0 is not 
 #screenpin  = 17 #pin to toggle the display on/off - depreciated
 sleepwait = 0.1 #Time delay for how long to hold a button press to toggle the display. 
 
 db='vodville'
-username = os.getenv('STATS_USERNAME')
-password = os.getenv('STATS_PASSWORD') 
+username = os.getenv('STATS_VANHACK_USERNAME')
+password = os.getenv('STATS_VANHACK_PASSWORD')
+
 
 class _GpioParser(argparse.Action):
     """ Parse a GPIO spec string (see argparse setup later in this file) """
@@ -105,10 +110,12 @@ class VidLooper(object):
     _p = None
 
     def __init__(self, audio='hdmi', autostart=True, restart_on_press=False,
-                 video_dir=os.getcwd(), videos=None, gpio_pins=None, loop=True,
+                 video_dir=None, video_dirAD=None, videos=None, gpio_pins=None, loop=True,
                  no_osd=False, shutdown_pin=None, splash=None, debug=False):
-	global vidcount
-	# Use default GPIO pins, if needed
+    #os.getcwd()
+        global vidcount
+        global vidcountAD
+        # Use default GPIO pins, if needed
         if gpio_pins is None:
             gpio_pins = self._GPIO_PIN_DEFAULT.copy()
         self.gpio_pins = gpio_pins
@@ -117,23 +124,21 @@ class VidLooper(object):
         self.shutdown_pin = shutdown_pin
 
 
+        # Assemble the list of videos to play
+        self.videos = [os.path.join(video_dir, f)
+                        for f in sorted(os.listdir(video_dir))
+                        if os.path.splitext(f)[1] in self._VIDEO_EXTS]
+        if not self.videos:
+            raise Exception('No videos found in "{}". Please specify a different '
+                            'directory or filename(s).'.format(video_dir))
+        self.videosAD = [os.path.join(video_dirAD, g)
+                        for g in sorted(os.listdir(video_dirAD))
+                        if os.path.splitext(g)[1] in self._VIDEO_EXTS]
+        if self.videosAD:
+            AD = 1
 
-
-        # Assemble the list of videos to play, if needed
-        if videos:
-            self.videos = videos
-            for video in videos:
-                if not os.path.exists(video):
-                    raise FileNotFoundError('Video "{}" not found'.format(video))
-        else:
-            self.videos = [os.path.join(video_dir, f)
-                           for f in sorted(os.listdir(video_dir))
-                           if os.path.splitext(f)[1] in self._VIDEO_EXTS]
-            if not self.videos:
-                raise Exception('No videos found in "{}". Please specify a different '
-                                'directory or filename(s).'.format(video_dir))
-	vidcount = len(self.videos)
-
+        vidcount = len(self.videos)
+        vidcountAD = len(self.videosAD) 
         self.debug = debug
 
         assert audio in ('hdmi', 'local', 'both'), "Invalid audio choice"
@@ -152,95 +157,103 @@ class VidLooper(object):
             os.killpg(os.getpgid(self._p.pid), signal.SIGINT)
             self._p = None
 
+    def log_button(self):
+        r = requests.post(	
+        'http://stats.vanhack.ca:8086/write?db={}&u={}&p={}'.format(db, username, password),
+                data='vodville button=1',
+                timeout=2)
+
     def switch_vid(self, pin):
         """ Switch to the video corresponding to the shorted pin """
-	global state
+        global state
         global curvideo
-	global vidcount
-	lightsdown = 0
-	global lastpress
-	logflag = 0 
-	#only allow button presses every 4 seconds to avoid multiple videos 
-	if time.time() > lastpress  + 4:
-		#Only send to the logging server if its been more than x seconds since the last press
-		if time.time() > lastpress  + 20:
-			logflag = 1
-		else:
-		#toddler spamming button
-			logflag = 2 
- 		lastpress = time.time()
-	#global pi
-	# Use a mutex lock to avoid race condition when
-        # multiple buttons are pressed quickly
-        	with self._mutex:
-
-        	 filename = self.videos[curvideo]
-	   	 curvideo = curvideo + 1
-	   	 if curvideo >= vidcount:
-			curvideo = 0
-           	 if filename != self._active_vid or self.restart_on_press:
-                	# Kill any previous video player process
-               		self._kill_process()
-                        #never hurts to clear the screen and the terminal incase some garbage showed up
-
-
-			if not state: #turn the hdmi power on
-                        	if screentoggle:
-                                        os.system ("vcgencmd display_power 1")
-
-					#cmd =['vcgencmd','display_power','1']
-                                        #self._p = Popen(cmd)
-                                lightsdown = 1
-                                state = 1
-				#play a projector sound from the PI 
-				cmd = ['aplay','-D','sysdefault:1', '/home/vodville/sprojector.wav']
-                                self._p = Popen(cmd)
+        global vidcount
+        global curvideoAD
+        global vidcountAD
+        lightsdown = 0
+        global lastpress
+        logflag = 0 
+        #only allow button presses every 4 seconds to avoid multiple videos 
+        if time.time() > lastpress  + 4:
+            #Only send to the logging server if its been more than x seconds since the last press
+            if time.time() > lastpress  + 20:
+                logflag = 1
+            else:
+                logflag = 2
+            lastpress = time.time()
+            # Use a mutex lock to avoid race condition when
+            # multiple buttons are pressed quickly
+            if AD: #are there afterdark videos in the directory
+                if time.time() >= 22  or time.time() <=  4:
+                    afterdark = True
+            else:
+                afterdark = False
+            with self._mutex:
+                if afterdark:
+                    filename = self.videosAD[curvideoAD]
+                    curvideoAD = curvideoAD + 1
+                    if curvideoAD >= vidcountAD:
+                        curvideoAD = 0
+                else:
+                    filename = self.videos[curvideo]
+                    curvideo = curvideo + 1
+                    if curvideo >= vidcount:
+                        curvideo = 0
 
 
-			#play a projector spooling up sound, shorter if we already have the lights down
-			if not lightsdown:
-				os.system('clear')
-                        	print ("\033c")
-                                cmd = ['aplay','-q', '/home/vodville/sprojector.wav']
-				self._p = Popen(cmd)
+                if filename != self._active_vid or self.restart_on_press:
+                    # Kill any previous video player process
+                    self._kill_process()
+                    #never hurts to clear the screen and the terminal incase some garbage showed up
+                    os.system('clear')
+                    print ("\033c")
+                    if not state: #turn the hdmi power on
+                        if screentoggle:
+                            os.system ("vcgencmd display_power 1")
+                        lightsdown = 1
+                        state = 1
+                        #play a projector sound from the PI
+                        os.system('clear')
+                        print ("\033c")
+                        cmd = ['aplay','-q','-D','sysdefault:1', '/home/vodville/sprojector.wav']
+                        self._p = Popen(cmd)
 
-                        #else:
-                        #       cmd = ['aplay','-q', '/home/vodville/projector.wav']
-                      	#	self._p = Popen(cmd)
 
-                	# Start a new video player process, capture STDOUT to keep the
-               		# screen clear. Set a session ID (os.setsid) to allow us to kill
-                	# the whole video player process tree.
-                	cmd = ['omxplayer','--win', '120,25,590,530', '--orientation', '180', '-b', '--aspect-mode', 'stretch',  '-o', self.audio]
-                	if self.loop:
-                    		cmd += ['--loop']
-                	if self.no_osd:
-                    		cmd += ['--no-osd']
+                #play a projector spooling up sound, shorter if we already have the lights down
+                if not lightsdown:
+                    os.system('clear')
+                    print ("\033c")
+                    cmd = ['aplay','-q', '/home/vodville/sprojector.wav']
+                    self._p = Popen(cmd)
 
-                	self._p = Popen(cmd + [filename],
-                                stdout=None if self.debug else PIPE,
-                                preexec_fn=os.setsid)
-                	self._active_vid = filename
+                # Start a new video player process, capture STDOUT to keep the
+                # screen clear. Set a session ID (os.setsid) to allow us to kill
+                # the whole video player process tree.
+                cmd = ['omxplayer','--win', '120,25,590,530', '--orientation', '180', '-b', '--aspect-mode', 'stretch',  '-o', self.audio]
+                if self.loop:
+                        cmd += ['--loop']
+                if self.no_osd:
+                        cmd += ['--no-osd']
 
-                	if lightsdown:
-				for p in range(lmax,lmin,-1):
-                        		pi.set_PWM_dutycycle(lpin, p)
-                        		time.sleep(0.013)
-				lightsdown  = 0
-				#Spread the dimming over 3, seconds to give the screen time to wake up
-	#post to the stats server
-	if logflag == 1:
-		r = requests.post(
- 		'https://******************/write?db={}&u={}&p={}'.format(db, username, password),
-                data='vodville button=1'
-                )
-		logflag = 0 
-	if logflag == 2:
-               	r = requests.post(
-                'https://******************/write?db={}&u={}&p={}'.format(db, username, password),
-                data='vodville toddler=1'
-                )
-		logflag =0
+                self._p = Popen(cmd + [filename],
+                            stdout=None if self.debug else PIPE,
+                            preexec_fn=os.setsid)
+                self._active_vid = filename
+
+                if lightsdown:
+                    for p in range(lmax,lmin,-1):
+                        pi.set_PWM_dutycycle(lpin, p)
+                        time.sleep(0.013)
+                    lightsdown  = 0
+                    #Spread the dimming over 3, seconds to give the screen time to wake up
+            if logflag == 1:
+                t = threading.Thread(target=log_button)
+                threads.append(t)
+                t.start()
+
+        os.system('clear')
+        print ("\033c")
+
    
 
     @property
@@ -249,23 +262,20 @@ class VidLooper(object):
         return tuple(self.gpio_pins.keys())
 
     def start(self):
-	global pi
-	global state
+        global pi
+        global state
 
 
-    	if not state:
+        if not state:
+            for p in range(lmin, lmax):
+                pi.set_PWM_dutycycle(lpin, p)
+                time.sleep(0.013)
 
-			for p in range(lmin, lmax):
-        			pi.set_PWM_dutycycle(lpin, p)
-        			time.sleep(0.013)
-
-	#clear the screen on startup	
-	os.system('clear')
+        #clear the screen on startup	
+        os.system('clear')
         print ("\033c")
 
-
-
-	if not self.debug:
+        if not self.debug:
             # Clear the screen
             os.system('clear')
             # Disable the (blinking) cursor
@@ -273,18 +283,12 @@ class VidLooper(object):
 
         # Set up GPIO
         GPIO.setmode(GPIO.BCM)
-	#cmd = ['setterm','--blank','1']
-        #self._p = Popen(cmd)
 
-	if screentoggle: #turn off the screen after boot
-		os.system ("vcgencmd display_power 0")
-
-		#cmd =['vcgencmd','display_power','0']
-                #self._p = Popen(cmd)
-
+        if screentoggle: #turn off the screen after boot
+            os.system ("vcgencmd display_power 0")
 
         for in_pin, out_pin in self.gpio_pins.items():
-        	GPIO.setup(in_pin, GPIO.IN, pull_up_down=GPIO.PUD_OFF)
+            GPIO.setup(in_pin, GPIO.IN, pull_up_down=GPIO.PUD_OFF)
 
 
 
@@ -293,23 +297,22 @@ class VidLooper(object):
         if self.shutdown_pin:
             GPIO.setup(self.shutdown_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
             GPIO.add_event_detect(self.shutdown_pin,
-                                  GPIO.FALLING,
-                                  callback=lambda _: call(['shutdown', '-h', 'now'], shell=False),
-                                  bouncetime=self._GPIO_BOUNCE_TIME)
+                                    GPIO.FALLING,
+                                    callback=lambda _: call(['shutdown', '-h', 'now'], shell=False),
+                                    bouncetime=self._GPIO_BOUNCE_TIME)
 
         if self.autostart:
             if self.splash is not None:
                 self._splashproc = Popen(['fbi', '--noverbose', '-a',
-                                          self.splash])
+                                            self.splash])
             else:
                 # Start playing first video
-		#play a projector spooling up sound, shorter if we already have the lights down
                 self.switch_vid(self.in_pins[0])
 
         # Enable event detection on each input pin
         for pin in self.in_pins:
             GPIO.add_event_detect(pin, GPIO.FALLING, callback=self.switch_vid,
-                                  bouncetime=self._GPIO_BOUNCE_TIME)
+                                    bouncetime=self._GPIO_BOUNCE_TIME)
 
         # Loop forever
         try:
@@ -324,24 +327,18 @@ class VidLooper(object):
                         if self._p.pid == pid:
                             self._active_vid = None
                             self._p = None
-			    if state == 1: #turn the screen off when we are done 
-  			    	if screentoggle:
-                                        os.system ("vcgencmd display_power 0")
+                            if state == 1: #turn the screen off when we are done 
+                                if screentoggle:
+                                    os.system ("vcgencmd display_power 0")
+                                state=0
+                                os.system('clear')
+                                print ("\033c")
+                                for p in range(lmin, lmax, 1): #and bring up the house lights 
+                                        pi.set_PWM_dutycycle(lpin, p)
+                                        time.sleep(0.013)
 
-					#cmd =['vcgencmd','display_power','0']
-                                        #self._p = Popen(cmd)
-
-				state=0
-				#cmd = ['setterm','--blank','1']
-                        	#self._p = Popen(cmd)
-
-
-				for p in range(lmin, lmax, 1): #and bring up the house lights 
-    					pi.set_PWM_dutycycle(lpin, p)
-    					time.sleep(0.013)
-
-	except KeyboardInterrupt:
-	    pass
+        except KeyboardInterrupt:
+            pass
         finally:
             self.__del__()
 
@@ -390,13 +387,15 @@ Raspberry Pi, which must be installed separately.
         help='If True, restart the current video if the button for the active '
              'video is pressed. If False, pressing the button for the active '
              'video will be ignored.')
-    vidmode = parser.add_mutually_exclusive_group()
-    vidmode.add_argument(
+    #vidmode = parser.add_mutually_exclusive_group()
+    parser.add_argument(
         '--video-dir', default=os.getcwd(),
         help='Directory containing video files. Use this or specify videos one '
              'at a time at the end of the command.')
-    vidmode.add_argument('videos', action="store", nargs='*', default=(),
-                         help='List of video paths (local, rtsp:// or rtmp://)')
+    parser.add_argument(
+        '--video-dirAD', default=os.getcwd(),
+        help='Directory containing video files. Use this or specify videos one '
+             'at a time at the end of the command.')
     parser.add_argument('--gpio-pins', default=VidLooper._GPIO_PIN_DEFAULT,
                         action=_GpioParser,
                         help='List of GPIO pins. Either INPUT:OUTPUT pairs, or '
