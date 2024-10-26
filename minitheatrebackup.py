@@ -1,4 +1,4 @@
-# Mini theatre script for running a one button video player
+5# Mini theatre script for running a one button video player
 #    Copyright (C) 2024 David Bynoe
 #
 #    This program is free software: you can redistribute it and/or modify
@@ -18,8 +18,7 @@ import RPi.GPIO as GPIO
 import os
 import sys
 from subprocess import Popen, PIPE, call
-import datetime 
-import time
+import  time
 from threading import Lock
 import signal
 import argparse
@@ -29,7 +28,6 @@ import threading
 import requests
 
 threads =[]
-
 
 pi = pigpio.pi() # connect to local Pi
 lastpress = time.time()
@@ -46,7 +44,8 @@ vidcount = 0 #Number of videos available in the usb home directory
 curvideo = 0 #Which video number are we playing at the moment 
 vidcountAD = 0 #how many after dark videos 
 curvideoAD = 0  #which after dark video 
-ADFlag = True #are there after dark videos 
+
+AD = False  #are there after dark videos 
 
 state = 0 #current power state of the display 
 screentoggle = 1 #toggle the screen or not, 0 is not 
@@ -56,6 +55,7 @@ sleepwait = 0.1 #Time delay for how long to hold a button press to toggle the di
 db='vodville'
 username = os.getenv('STATS_VANHACK_USERNAME')
 password = os.getenv('STATS_VANHACK_PASSWORD')
+
 
 class _GpioParser(argparse.Action):
     """ Parse a GPIO spec string (see argparse setup later in this file) """
@@ -112,13 +112,9 @@ class VidLooper(object):
     def __init__(self, audio='hdmi', autostart=True, restart_on_press=False,
                  video_dir=None, video_dirAD=None, videos=None, gpio_pins=None, loop=True,
                  no_osd=False, shutdown_pin=None, splash=None, debug=False):
-        if debug is False:
-            sys.stdout = open(os.devnull, "w")
-            sys.stderr = open(os.devnull, "w")
-    	#os.getcwd()
+    #os.getcwd()
         global vidcount
         global vidcountAD
-        global ADFlag
         # Use default GPIO pins, if needed
         if gpio_pins is None:
             gpio_pins = self._GPIO_PIN_DEFAULT.copy()
@@ -138,8 +134,8 @@ class VidLooper(object):
         self.videosAD = [os.path.join(video_dirAD, g)
                         for g in sorted(os.listdir(video_dirAD))
                         if os.path.splitext(g)[1] in self._VIDEO_EXTS]
-        if not self.videosAD:
-           ADFlag = False
+        if self.videosAD:
+            AD = 1
 
         vidcount = len(self.videos)
         vidcountAD = len(self.videosAD) 
@@ -174,7 +170,6 @@ class VidLooper(object):
         global vidcount
         global curvideoAD
         global vidcountAD
-        global ADFlag
         lightsdown = 0
         global lastpress
         logflag = 0 
@@ -188,10 +183,13 @@ class VidLooper(object):
             lastpress = time.time()
             # Use a mutex lock to avoid race condition when
             # multiple buttons are pressed quickly
-            current_time = datetime.datetime.now()
-            now = datetime.time(current_time.hour, current_time.minute)
-            if now >= datetime.time(22,0) or now <= datetime.time(4,0): #its late, lets show something different
-                if ADFlag is True: #are there afterdark videos in the directory
+            if AD: #are there afterdark videos in the directory
+                if time.time() >= 22  or time.time() <=  4:
+                    afterdark = True
+            else:
+                afterdark = False
+            with self._mutex:
+                if afterdark:
                     filename = self.videosAD[curvideoAD]
                     curvideoAD = curvideoAD + 1
                     if curvideoAD >= vidcountAD:
@@ -201,13 +199,8 @@ class VidLooper(object):
                     curvideo = curvideo + 1
                     if curvideo >= vidcount:
                         curvideo = 0
-            else:
-                filename = self.videos[curvideo]
-                curvideo = curvideo + 1
-                if curvideo >= vidcount:
-                    curvideo = 0
-                    
-            with self._mutex:    
+
+
                 if filename != self._active_vid or self.restart_on_press:
                     # Kill any previous video player process
                     self._kill_process()
